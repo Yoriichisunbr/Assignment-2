@@ -95,6 +95,10 @@ class Point:
         """A point's MBR is just a rectangle with zero width and height."""
         return MBR(self.x, self.y, self.x, self.y)
 
+    @property
+    def mbr(self):
+        return MBR(self.x, self.y, self.x, self.y)
+
     def __repr__(self):
         return f"p{self.id}({self.x:g},{self.y:g})"
 
@@ -245,7 +249,7 @@ class RTree:
                 self._handle_overflow(leaf)
             else:
                 # no overflow, just stretch the MBRs on the way up
-                self._adjust_upwards(leaf)
+                self._expand_upwards(leaf, point.x, point.y)
             if self.verbose:
                 self.print_tree()
 
@@ -284,6 +288,24 @@ class RTree:
                 node.update_mbr()
                 node = node.parent
 
+
+        def _expand_upwards(self, node, x, y):
+            while node is not None:
+                if node.mbr is None:
+                    node.mbr = MBR(x, y, x, y)
+                else:
+                    mbr = node.mbr
+                    if x < mbr.x1:
+                        mbr.x1 = x
+                    if y < mbr.y1:
+                        mbr.y1 = y
+                    if x > mbr.x2:
+                        mbr.x2 = x
+                    if y > mbr.y2:
+                        mbr.y2 = y
+
+                node = node.parent
+
         def _handle_overflow(self, node):
             """Split an overflowing node. If that makes the parent overflow,
             keep splitting up the tree. Makes a new root if the root splits."""
@@ -317,13 +339,10 @@ class RTree:
             self._adjust_upwards(node)
 
         def _split(self, node):
-            """Split node into two. The original node keeps the first group and
-            a new node gets the second group. Returns the new node."""
             entries = node.entries
             n = len(entries)
             m = self.min_fill
 
-            # helper functions to get the lower/upper coordinate of an entry
             if node.is_leaf:
                 def keys_x(e):
                     return (e.x, e.y)
@@ -337,17 +356,55 @@ class RTree:
                 def keys_y(e):
                     return (e.mbr.y1, e.mbr.y2)
 
-            best = None  # (cost, axis_name, k, sorted_list)
-            # try sorting by x first and then by y
+            best = None
+
             for axis_name, key in (("x", keys_x), ("y", keys_y)):
                 ordered = sorted(entries, key=key)
-                # try every cut that leaves at least m entries on each side
+
+                prefix = []
+                suffix = []
+
+                x1 = y1 = float("inf")
+                x2 = y2 = float("-inf")
+
+                for e in ordered:
+                    if node.is_leaf:
+                        ex1 = ex2 = e.x
+                        ey1 = ey2 = e.y
+                    else:
+                        ex1, ey1 = e.mbr.x1, e.mbr.y1
+                        ex2, ey2 = e.mbr.x2, e.mbr.y2
+
+                    x1 = min(x1, ex1)
+                    y1 = min(y1, ey1)
+                    x2 = max(x2, ex2)
+                    y2 = max(y2, ey2)
+
+                    prefix.append(2 * ((x2 - x1) + (y2 - y1)))
+
+                x1 = y1 = float("inf")
+                x2 = y2 = float("-inf")
+
+                for e in reversed(ordered):
+                    if node.is_leaf:
+                        ex1 = ex2 = e.x
+                        ey1 = ey2 = e.y
+                    else:
+                        ex1, ey1 = e.mbr.x1, e.mbr.y1
+                        ex2, ey2 = e.mbr.x2, e.mbr.y2
+
+                    x1 = min(x1, ex1)
+                    y1 = min(y1, ey1)
+                    x2 = max(x2, ex2)
+                    y2 = max(y2, ey2)
+
+                    suffix.append(2 * ((x2 - x1) + (y2 - y1)))
+
+                suffix.reverse()
+
                 for k in range(m, n - m + 1):
-                    g1 = ordered[:k]
-                    g2 = ordered[k:]
-                    cost = (mbr_of_entries(g1, node.is_leaf).perimeter() +
-                            mbr_of_entries(g2, node.is_leaf).perimeter())
-                    # strictly smaller only, so ties keep the earlier option
+                    cost = prefix[k - 1] + suffix[k]
+
                     if best is None or cost < best[0]:
                         best = (cost, axis_name, k, ordered)
 
@@ -355,25 +412,26 @@ class RTree:
             group1 = ordered[:k]
             group2 = ordered[k:]
 
-            # original node keeps group 1
             node.entries = group1
             node.update_mbr()
 
-            # new sibling node gets group 2
             new_node = Node(is_leaf=node.is_leaf)
             new_node.entries = group2
-            # children that moved need to know their new parent
+
             if not node.is_leaf:
                 for child in group2:
                     child.parent = new_node
+
             new_node.update_mbr()
 
             self._log(f"  SPLIT {node.name} on {axis_name}-axis at position {k} "
                       f"(total perimeter {cost:g})")
             self._log(f"    {node.name}: {self._entry_names(group1)}  MBR={node.mbr}")
             self._log(f"    {new_node.name}: {self._entry_names(group2)}  MBR={new_node.mbr}")
-            return new_node
 
+            return new_node
+    
+       
         # -- helpers for printing / checking ------------------------------------
         @staticmethod
         def _entry_names(entries):
