@@ -5,7 +5,7 @@ import heapq
 from rtree import RTree, Node, Point, load_points, load_sample_file
 
 DATASET = "city1"
-B = 5  # max node capacity used for the real DATASET
+B = 5
 DATA_DIR = "DATASETs/Task3_Datasets/"
 
 
@@ -112,22 +112,21 @@ def make_dc_trees(points, num_bins):
     return trees
 
 def dc_skyline(trees):
-    candidates = []
-    for tree in trees:
-        candidates.extend(bbs_skyline(tree))
+    left_candidates = bbs_skyline(trees[0])
+    right_candidates = bbs_skyline(trees[1])
 
-    candidates.sort(key=lambda p: p.x)
+    left_candidates.sort(key=lambda p: p.x)
+    right_candidates.sort(key=lambda p: p.x)
 
-    skylines = []
-    min_y = float("inf")
+    skylines = left_candidates.copy()
+    min_y = min(p.y for p in left_candidates)
 
-    for point in candidates:
+    for point in right_candidates:
         if point.y < min_y:
             skylines.append(point)
             min_y = point.y
 
     return skylines
-
 
 def time_algorithm(name, algorithm, *args, **kwargs):
     start = time.perf_counter()
@@ -171,16 +170,11 @@ def main():
             print(text)
             print(text, file=f)
 
-        output("Skylines:")
-        output(f"seq: {sequential}")
-        output(f"bbs: {bbs}")
-        output(f"dc:  {dc}")
-
         sequential.sort(key=lambda p: (p.x, p.y))
         bbs.sort(key=lambda p: (p.x, p.y))
         dc.sort(key=lambda p: (p.x, p.y))
 
-        output("\nSorted:")
+        output("\nSorted skylines:")
         output(f"seq: {sequential}")
         output(f"bbs: {bbs}")
         output(f"dc:  {dc}")
