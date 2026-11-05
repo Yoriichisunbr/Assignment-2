@@ -20,6 +20,7 @@ Construction rules (the same for every task):
     overflows it is split too. If the root splits, a new root is made.
 
 Only standard library modules are used (math, sys).
+No R-tree library is used - everything below is our own implementation.
 """
 
 import math
@@ -97,6 +98,8 @@ class Point:
 
     @property
     def mbr(self):
+        """Same as get_mbr(), but as an attribute (p.mbr), so points and
+        nodes can be treated the same way by the search code (e.g. BBS)."""
         return MBR(self.x, self.y, self.x, self.y)
 
     def __repr__(self):
@@ -202,288 +205,313 @@ class Node:
         kind = "Leaf" if self.is_leaf else "Internal"
         return f"{self.name}({kind}, {len(self.entries)} entries, MBR={self.mbr})"
 
-    # ---------------------------------------------------------------------------
-    # The R-tree
-    # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# The R-tree
+# ---------------------------------------------------------------------------
 
 class RTree:
-        """R-tree for 2D points with a configurable max node capacity B."""
+    """R-tree for 2D points with a configurable max node capacity B."""
 
-        def __init__(self, B=4, min_fill=None, verbose=False):
-            # B must be at least 2 or a split makes no sense
-            if B < 2:
-                raise ValueError("B (max node capacity) must be at least 2")
-            self.B = B  # max entries allowed in one node
-            # min entries per node after a split, default is 40% of B (rounded up)
-            if min_fill is None:
-                min_fill = max(1, math.ceil(0.4 * B))
-            self.min_fill = min_fill
-            self.verbose = verbose  # True -> print every step (for the report)
-            self.size = 0  # how many points are in the tree
-            Node._counter = 0  # restart node names for each new tree
-            self.root = Node(is_leaf=True)  # start with one empty leaf as root
+    def __init__(self, B=4, min_fill=None, verbose=False):
+        # B must be at least 2 or a split makes no sense
+        if B < 2:
+            raise ValueError("B (max node capacity) must be at least 2")
+        self.B = B  # max entries allowed in one node
+        # min entries per node after a split, default is 40% of B (rounded up)
+        if min_fill is None:
+            min_fill = max(1, math.ceil(0.4 * B))
+        self.min_fill = min_fill
+        self.verbose = verbose  # True -> print every step (for the report)
+        self.size = 0  # how many points are in the tree
+        Node._counter = 0  # restart node names for each new tree
+        self.root = Node(is_leaf=True)  # start with one empty leaf as root
 
-        # -- logging ---------------------------------------------------------
-        def _log(self, msg):
-            """Print a message only when verbose mode is on."""
-            if self.verbose:
-                print(msg)
+    # -- logging ---------------------------------------------------------
+    def _log(self, msg):
+        """Print a message only when verbose mode is on."""
+        if self.verbose:
+            print(msg)
 
-        # -- building --------------------------------------------------------
-        def build(self, points):
-            """Insert every point one by one (same order as the file)."""
-            # loop over all the points and insert each one
-            for p in points:
-                self.insert(p)
-            return self
+    # -- building --------------------------------------------------------
+    def build(self, points):
+        """Insert every point one by one (same order as the file)."""
+        # loop over all the points and insert each one
+        for p in points:
+            self.insert(p)
+        return self
 
-        def insert(self, point):
-            """Insert one point into the tree."""
-            self._log(f"\n--- Insert {point} ---")
-            leaf = self._choose_leaf(point)  # 1. find the best leaf
-            leaf.entries.append(point)  # 2. put the point in it
-            self.size += 1
-            self._log(f"  placed in {leaf.name}")
-            # 3. if the leaf now has too many entries, deal with the overflow
-            if len(leaf.entries) > self.B:
-                self._handle_overflow(leaf)
-            else:
-                # no overflow, just stretch the MBRs on the way up
-                self._expand_upwards(leaf, point.x, point.y)
-            if self.verbose:
-                self.print_tree()
+    def insert(self, point):
+        """Insert one point into the tree."""
+        self._log(f"\n--- Insert {point} ---")
+        leaf = self._choose_leaf(point)  # 1. find the best leaf
+        leaf.entries.append(point)  # 2. put the point in it
+        self.size += 1
+        self._log(f"  placed in {leaf.name}")
+        # 3. if the leaf now has too many entries, deal with the overflow
+        if len(leaf.entries) > self.B:
+            self._handle_overflow(leaf)
+        else:
+            # no overflow, just stretch the MBRs on the way up
+            self._expand_upwards(leaf, point.x, point.y)
+        if self.verbose:
+            self.print_tree()
 
-        def _choose_leaf(self, point):
-            """Go down from the root, at each level picking the child whose
-            perimeter grows the least. Returns the leaf we end up at."""
-            node = self.root
-            # keep going down until we hit a leaf
-            while not node.is_leaf:
-                best_child = None
-                best_inc = None
-                best_area = None
-                best_perim = None
-                # check every child of this node
-                for child in node.entries:
-                    inc = child.mbr.perimeter_increase(point.x, point.y)
-                    area = child.mbr.area()
-                    perim = child.mbr.perimeter()
-                    # pick smaller increase; if the increase is the same,
-                    # favour the smaller MBR (area first, then perimeter)
-                    if (best_child is None or inc < best_inc or
-                            (inc == best_inc and (area, perim) < (best_area, best_perim))):
-                        best_child = child
-                        best_inc = inc
-                        best_area = area
-                        best_perim = perim
-                self._log(f"  choose subtree: {node.name} -> {best_child.name} "
-                          f"(perimeter increase {best_inc:g})")
-                node = best_child
-            return node
+    def _choose_leaf(self, point):
+        """Go down from the root, at each level picking the child whose
+        perimeter grows the least. Returns the leaf we end up at."""
+        node = self.root
+        # keep going down until we hit a leaf
+        while not node.is_leaf:
+            best_child = None
+            best_inc = None
+            best_area = None
+            best_perim = None
+            # check every child of this node
+            for child in node.entries:
+                inc = child.mbr.perimeter_increase(point.x, point.y)
+                area = child.mbr.area()
+                perim = child.mbr.perimeter()
+                # pick smaller increase; if the increase is the same,
+                # favour the smaller MBR (area first, then perimeter)
+                if (best_child is None or inc < best_inc or
+                        (inc == best_inc and (area, perim) < (best_area, best_perim))):
+                    best_child = child
+                    best_inc = inc
+                    best_area = area
+                    best_perim = perim
+            self._log(f"  choose subtree: {node.name} -> {best_child.name} "
+                      f"(perimeter increase {best_inc:g})")
+            node = best_child
+        return node
 
-        def _adjust_upwards(self, node):
-            """Update the MBR of this node and every ancestor up to the root."""
-            # walk up the parent links
-            while node is not None:
-                node.update_mbr()
-                node = node.parent
-
-
-        def _expand_upwards(self, node, x, y):
-            while node is not None:
-                if node.mbr is None:
-                    node.mbr = MBR(x, y, x, y)
-                else:
-                    mbr = node.mbr
-                    if x < mbr.x1:
-                        mbr.x1 = x
-                    if y < mbr.y1:
-                        mbr.y1 = y
-                    if x > mbr.x2:
-                        mbr.x2 = x
-                    if y > mbr.y2:
-                        mbr.y2 = y
-
-                node = node.parent
-
-        def _handle_overflow(self, node):
-            """Split an overflowing node. If that makes the parent overflow,
-            keep splitting up the tree. Makes a new root if the root splits."""
-            # keep going while the current node is over capacity
-            while node is not None and len(node.entries) > self.B:
-                self._log(f"  OVERFLOW at {node.name}: {len(node.entries)} entries > B={self.B}")
-                new_node = self._split(node)  # node keeps group 1, new_node gets group 2
-
-                # case 1: we just split the root -> grow the tree by one level
-                if node.parent is None:
-                    new_root = Node(is_leaf=False)
-                    new_root.entries = [node, new_node]
-                    node.parent = new_root
-                    new_node.parent = new_root
-                    new_root.update_mbr()
-                    self.root = new_root
-                    self._log(f"  root was split -> new root {new_root.name} "
-                              f"with children {node.name}, {new_node.name}")
-                    return
-
-                # case 2: normal node -> put the new sibling into the parent
-                parent = node.parent
-                new_node.parent = parent
-                parent.entries.append(new_node)
-                self._log(f"  {new_node.name} added to parent {parent.name} "
-                          f"(now {len(parent.entries)} entries)")
-                # move up and check whether the parent overflows now
-                node = parent
-
-            # whatever node we stopped at is fine, so fix MBRs from there up
-            self._adjust_upwards(node)
-
-        def _split(self, node):
-            entries = node.entries
-            n = len(entries)
-            m = self.min_fill
-
-            if node.is_leaf:
-                def keys_x(e):
-                    return (e.x, e.y)
-
-                def keys_y(e):
-                    return (e.y, e.x)
-            else:
-                def keys_x(e):
-                    return (e.mbr.x1, e.mbr.x2)
-
-                def keys_y(e):
-                    return (e.mbr.y1, e.mbr.y2)
-
-            best = None
-
-            for axis_name, key in (("x", keys_x), ("y", keys_y)):
-                ordered = sorted(entries, key=key)
-
-                prefix = []
-                suffix = []
-
-                x1 = y1 = float("inf")
-                x2 = y2 = float("-inf")
-
-                for e in ordered:
-                    if node.is_leaf:
-                        ex1 = ex2 = e.x
-                        ey1 = ey2 = e.y
-                    else:
-                        ex1, ey1 = e.mbr.x1, e.mbr.y1
-                        ex2, ey2 = e.mbr.x2, e.mbr.y2
-
-                    x1 = min(x1, ex1)
-                    y1 = min(y1, ey1)
-                    x2 = max(x2, ex2)
-                    y2 = max(y2, ey2)
-
-                    prefix.append(2 * ((x2 - x1) + (y2 - y1)))
-
-                x1 = y1 = float("inf")
-                x2 = y2 = float("-inf")
-
-                for e in reversed(ordered):
-                    if node.is_leaf:
-                        ex1 = ex2 = e.x
-                        ey1 = ey2 = e.y
-                    else:
-                        ex1, ey1 = e.mbr.x1, e.mbr.y1
-                        ex2, ey2 = e.mbr.x2, e.mbr.y2
-
-                    x1 = min(x1, ex1)
-                    y1 = min(y1, ey1)
-                    x2 = max(x2, ex2)
-                    y2 = max(y2, ey2)
-
-                    suffix.append(2 * ((x2 - x1) + (y2 - y1)))
-
-                suffix.reverse()
-
-                for k in range(m, n - m + 1):
-                    cost = prefix[k - 1] + suffix[k]
-
-                    if best is None or cost < best[0]:
-                        best = (cost, axis_name, k, ordered)
-
-            cost, axis_name, k, ordered = best
-            group1 = ordered[:k]
-            group2 = ordered[k:]
-
-            node.entries = group1
+    def _adjust_upwards(self, node):
+        """Update the MBR of this node and every ancestor up to the root."""
+        # walk up the parent links
+        while node is not None:
             node.update_mbr()
+            node = node.parent
 
-            new_node = Node(is_leaf=node.is_leaf)
-            new_node.entries = group2
 
-            if not node.is_leaf:
-                for child in group2:
-                    child.parent = new_node
+    def _expand_upwards(self, node, x, y):
+        """Faster MBR update used when an insert did NOT cause a split.
+        Adding one point can only make MBRs bigger, so we just stretch each
+        MBR on the path to the root to cover (x, y) instead of recomputing
+        it from all its entries."""
+        # walk from the leaf up to the root
+        while node is not None:
+            # first point in an empty node -> MBR is just that point
+            if node.mbr is None:
+                node.mbr = MBR(x, y, x, y)
+            else:
+                mbr = node.mbr
+                # stretch each side only if the new point is outside it
+                if x < mbr.x1:
+                    mbr.x1 = x
+                if y < mbr.y1:
+                    mbr.y1 = y
+                if x > mbr.x2:
+                    mbr.x2 = x
+                if y > mbr.y2:
+                    mbr.y2 = y
+            # move up to the parent
+            node = node.parent
 
-            new_node.update_mbr()
+    def _handle_overflow(self, node):
+        """Split an overflowing node. If that makes the parent overflow,
+        keep splitting up the tree. Makes a new root if the root splits."""
+        # keep going while the current node is over capacity
+        while node is not None and len(node.entries) > self.B:
+            self._log(f"  OVERFLOW at {node.name}: {len(node.entries)} entries > B={self.B}")
+            new_node = self._split(node)  # node keeps group 1, new_node gets group 2
 
-            self._log(f"  SPLIT {node.name} on {axis_name}-axis at position {k} "
-                      f"(total perimeter {cost:g})")
-            self._log(f"    {node.name}: {self._entry_names(group1)}  MBR={node.mbr}")
-            self._log(f"    {new_node.name}: {self._entry_names(group2)}  MBR={new_node.mbr}")
+            # case 1: we just split the root -> grow the tree by one level
+            if node.parent is None:
+                new_root = Node(is_leaf=False)
+                new_root.entries = [node, new_node]
+                node.parent = new_root
+                new_node.parent = new_root
+                new_root.update_mbr()
+                self.root = new_root
+                self._log(f"  root was split -> new root {new_root.name} "
+                          f"with children {node.name}, {new_node.name}")
+                return
 
-            return new_node
-    
-       
-        # -- helpers for printing / checking ------------------------------------
-        @staticmethod
-        def _entry_names(entries):
-            """Short text list of entries, e.g. 'p1 p4 p7' or 'N2 N3'."""
-            return " ".join(f"p{e.id}" if isinstance(e, Point) else e.name for e in entries)
+            # case 2: normal node -> put the new sibling into the parent
+            parent = node.parent
+            new_node.parent = parent
+            parent.entries.append(new_node)
+            self._log(f"  {new_node.name} added to parent {parent.name} "
+                      f"(now {len(parent.entries)} entries)")
+            # move up and check whether the parent overflows now
+            node = parent
 
-        def height(self):
-            """Number of levels (a tree with only a root leaf has height 1)."""
-            h = 1
-            node = self.root
-            # follow the first child down to a leaf
-            while not node.is_leaf:
-                node = node.entries[0]
-                h += 1
-            return h
+        # whatever node we stopped at is fine, so fix MBRs from there up
+        self._adjust_upwards(node)
 
-        def print_tree(self, node=None, depth=0, file=sys.stdout):
-            """Print the tree with indentation, one node per line."""
-            # start from the root on the first call
-            if node is None:
-                node = self.root
-            indent = "    " * depth
-            print(f"{indent}{node.name} {'[leaf]' if node.is_leaf else '[internal]'} "
-                  f"MBR={node.mbr}: {self._entry_names(node.entries)}", file=file)
-            # internal node -> print its children one level deeper
-            if not node.is_leaf:
-                for child in node.entries:
-                    self.print_tree(child, depth + 1, file)
+    def _split(self, node):
+        """Split node into two (Week 8 split). The original node keeps the
+        first group and a new node gets the second group. Returns the new node.
+        For each axis the entries are sorted once, then prefix/suffix
+        perimeters give the cost of every cut without rebuilding MBRs."""
+        entries = node.entries
+        n = len(entries)          # B + 1 entries in an overflowing node
+        m = self.min_fill         # each group needs at least this many
 
-        def check(self):
-            """Sanity check used while testing: every MBR is tight, no node
-            is over capacity, parent links are right and all leaves are at the
-            same depth. Returns the number of points found."""
-            leaf_depths = set()
-            count = 0
-            stack = [(self.root, 1)]
-            # depth-first walk over every node
-            while stack:
-                node, d = stack.pop()
-                assert len(node.entries) <= self.B, f"{node.name} over capacity"
-                # MBR stored must equal the MBR worked out from the entries
-                expect = mbr_of_entries(node.entries, node.is_leaf)
-                assert (node.mbr.x1, node.mbr.y1, node.mbr.x2, node.mbr.y2) == \
-                       (expect.x1, expect.y1, expect.x2, expect.y2), f"{node.name} MBR wrong"
+        # sort keys: points use their coordinates, nodes use their MBR
+        if node.is_leaf:
+            def keys_x(e):
+                return (e.x, e.y)
+
+            def keys_y(e):
+                return (e.y, e.x)
+        else:
+            def keys_x(e):
+                return (e.mbr.x1, e.mbr.x2)
+
+            def keys_y(e):
+                return (e.mbr.y1, e.mbr.y2)
+
+        best = None  # (cost, axis_name, k, sorted_list)
+
+        # try sorting by x first and then by y
+        for axis_name, key in (("x", keys_x), ("y", keys_y)):
+            ordered = sorted(entries, key=key)
+
+            prefix = []  # prefix[i] = perimeter of MBR(ordered[0..i])
+            suffix = []  # suffix[i] = perimeter of MBR(ordered[i..n-1])
+
+            # running MBR, starts "empty"
+            x1 = y1 = float("inf")
+            x2 = y2 = float("-inf")
+
+            # left to right: grow the MBR one entry at a time
+            for e in ordered:
+                # an entry's own box: a point, or a child node's MBR
                 if node.is_leaf:
-                    leaf_depths.add(d)
-                    count += len(node.entries)
+                    ex1 = ex2 = e.x
+                    ey1 = ey2 = e.y
                 else:
-                    # every child must point back to this node
-                    for c in node.entries:
-                        assert c.parent is node, f"{c.name} has wrong parent"
-                        stack.append((c, d + 1))
-            assert len(leaf_depths) == 1, "leaves are at different depths"
-            assert count == self.size, "point count mismatch"
-            return count
+                    ex1, ey1 = e.mbr.x1, e.mbr.y1
+                    ex2, ey2 = e.mbr.x2, e.mbr.y2
+
+                x1 = min(x1, ex1)
+                y1 = min(y1, ey1)
+                x2 = max(x2, ex2)
+                y2 = max(y2, ey2)
+
+                prefix.append(2 * ((x2 - x1) + (y2 - y1)))
+
+            # reset the running MBR for the other direction
+            x1 = y1 = float("inf")
+            x2 = y2 = float("-inf")
+
+            # right to left: same idea for the second group
+            for e in reversed(ordered):
+                # an entry's own box: a point, or a child node's MBR
+                if node.is_leaf:
+                    ex1 = ex2 = e.x
+                    ey1 = ey2 = e.y
+                else:
+                    ex1, ey1 = e.mbr.x1, e.mbr.y1
+                    ex2, ey2 = e.mbr.x2, e.mbr.y2
+
+                x1 = min(x1, ex1)
+                y1 = min(y1, ey1)
+                x2 = max(x2, ex2)
+                y2 = max(y2, ey2)
+
+                suffix.append(2 * ((x2 - x1) + (y2 - y1)))
+
+            suffix.reverse()  # so suffix[k] lines up with ordered[k:]
+
+            # try every cut that leaves at least m entries on each side
+            for k in range(m, n - m + 1):
+                # group 1 = ordered[:k], group 2 = ordered[k:]
+                cost = prefix[k - 1] + suffix[k]
+
+                # strictly smaller only, so ties keep the earlier option
+                if best is None or cost < best[0]:
+                    best = (cost, axis_name, k, ordered)
+
+        cost, axis_name, k, ordered = best
+        group1 = ordered[:k]
+        group2 = ordered[k:]
+
+        # original node keeps group 1
+        node.entries = group1
+        node.update_mbr()
+
+        # new sibling node gets group 2
+        new_node = Node(is_leaf=node.is_leaf)
+        new_node.entries = group2
+
+        # children that moved need to know their new parent
+        if not node.is_leaf:
+            for child in group2:
+                child.parent = new_node
+
+        new_node.update_mbr()
+
+        self._log(f"  SPLIT {node.name} on {axis_name}-axis at position {k} "
+                  f"(total perimeter {cost:g})")
+        self._log(f"    {node.name}: {self._entry_names(group1)}  MBR={node.mbr}")
+        self._log(f"    {new_node.name}: {self._entry_names(group2)}  MBR={new_node.mbr}")
+
+        return new_node
+
+   
+    # -- helpers for printing / checking ------------------------------------
+    @staticmethod
+    def _entry_names(entries):
+        """Short text list of entries, e.g. 'p1 p4 p7' or 'N2 N3'."""
+        return " ".join(f"p{e.id}" if isinstance(e, Point) else e.name for e in entries)
+
+    def height(self):
+        """Number of levels (a tree with only a root leaf has height 1)."""
+        h = 1
+        node = self.root
+        # follow the first child down to a leaf
+        while not node.is_leaf:
+            node = node.entries[0]
+            h += 1
+        return h
+
+    def print_tree(self, node=None, depth=0, file=sys.stdout):
+        """Print the tree with indentation, one node per line."""
+        # start from the root on the first call
+        if node is None:
+            node = self.root
+        indent = "    " * depth
+        print(f"{indent}{node.name} {'[leaf]' if node.is_leaf else '[internal]'} "
+              f"MBR={node.mbr}: {self._entry_names(node.entries)}", file=file)
+        # internal node -> print its children one level deeper
+        if not node.is_leaf:
+            for child in node.entries:
+                self.print_tree(child, depth + 1, file)
+
+    def check(self):
+        """Sanity check used while testing: every MBR is tight, no node
+        is over capacity, parent links are right and all leaves are at the
+        same depth. Returns the number of points found."""
+        leaf_depths = set()
+        count = 0
+        stack = [(self.root, 1)]
+        # depth-first walk over every node
+        while stack:
+            node, d = stack.pop()
+            assert len(node.entries) <= self.B, f"{node.name} over capacity"
+            # MBR stored must equal the MBR worked out from the entries
+            expect = mbr_of_entries(node.entries, node.is_leaf)
+            assert (node.mbr.x1, node.mbr.y1, node.mbr.x2, node.mbr.y2) == \
+                   (expect.x1, expect.y1, expect.x2, expect.y2), f"{node.name} MBR wrong"
+            if node.is_leaf:
+                leaf_depths.add(d)
+                count += len(node.entries)
+            else:
+                # every child must point back to this node
+                for c in node.entries:
+                    assert c.parent is node, f"{c.name} has wrong parent"
+                    stack.append((c, d + 1))
+        assert len(leaf_depths) == 1, "leaves are at different depths"
+        assert count == self.size, "point count mismatch"
+        return count
