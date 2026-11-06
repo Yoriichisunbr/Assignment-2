@@ -4,8 +4,13 @@ import heapq
 
 from rtree import RTree, Node, Point, load_points, load_sample_file
 
-#DATASET = "Datasets/Task3_Datasets/city1"
-DATASET = "Datasets/Sample_data/skyline_search"
+DATASET = "Datasets/Task3_Datasets/city1"
+
+sample = False
+
+if sample:
+    DATASET = "Datasets/Sample_data/skyline_search"
+
 B = 5
 
 
@@ -243,7 +248,7 @@ def main():
     print(f"Dataset: {DATASET} ({len(points)} points), B={B}")
 
     t0 = time.perf_counter()
-    tree = RTree(B,None,True).build(points)
+    tree = RTree(B,None,False).build(points)
     print(f"R-tree built in {time.perf_counter() - t0:.1f}s (height {tree.height()})")
     t0 = time.perf_counter()
     dc_trees = make_dc_trees(points,2)
@@ -257,7 +262,7 @@ def main():
 
     bbs, bbs_time = time_algorithm(
         "BBS",
-        bbs_skyline_verbose,
+        bbs_skyline,
         tree
     )
 
@@ -282,9 +287,9 @@ def main():
         output(f"dc:  {dc}")
 
         output("\nTimes:")
-        output(f"seq time: {seq_time:.6f} seconds")
-        output(f"bbs time: {bbs_time:.6f} seconds")
-        output(f"dc time: {dc_time:.6f} seconds")
+        output(f"seq time: {seq_time * 1000:.3f}ms")
+        output(f"bbs time: {bbs_time * 1000:.3f}ms")
+        output(f"dc time: {dc_time * 1000:.3f}ms")
 
 
 
